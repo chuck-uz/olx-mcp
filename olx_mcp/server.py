@@ -26,7 +26,7 @@ __version__ = "0.1.0"
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 PAGE = 50          # объявлений в одном ответе Claude
 TEXT_CUT = 200     # символов описания в компактном виде
-JOB_TIMEOUT = 600  # 1000 объявлений собираются ~1,5 минуты, плюс очередь
+JOB_TIMEOUT = 1800  # 1000 объявлений ≈ 40 с, 10 000 ≈ 7 минут, плюс очередь
 
 SORTS = {
     "new": "created_at:desc",
@@ -55,8 +55,10 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Поисковый запрос или ссылка https://www.olx.uz/…"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100,
-                          "description": "Сколько объявлений собрать (OLX отдаёт не больше 1000 на поиск)"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 100,
+                          "description": "Сколько объявлений собрать, до 10 000. Сверх 1000 парсер дробит поиск "
+                                         "по цене: такие объявления идут от дешёвых к дорогим, без цены — не попадают. "
+                                         "~40 с на 1000"},
                 "price_from": {"type": "number", "description": "Цена от, в сумах"},
                 "price_to": {"type": "number", "description": "Цена до, в сумах"},
                 "sort": {"type": "string", "enum": list(SORTS),
@@ -190,7 +192,9 @@ def summary(rep: dict, dump_id: str) -> dict:
         "dump_id": dump_id,
         "title": rep.get("title"), "query": rep["filters"].get("query"), "source_url": rep["url"],
         "fetched_at": rep["fetched_at"],
-        "offers": s["offers"], "total_on_site": s.get("total_on_site"), "with_price": s["with_price"],
+        "offers": s["offers"],
+        "total_on_site": f"{s.get('total_on_site')}+" if s.get("total_capped") else s.get("total_on_site"),
+        "with_price": s["with_price"],
         "price_uzs": {k: fmt_num(v) for k, v in pu.items()} if pu else None,
         "currencies": s.get("currencies"), "business_sellers": s.get("business"),
         "dates": f"{s.get('from')} — {s.get('to')}",
@@ -213,7 +217,7 @@ class Server:
     def olx_search(self, args: dict, progress: Callable[[float, float | None, str], None]) -> dict:
         api = self._need_api()
         query = build_query(args["query"], args.get("price_from"), args.get("price_to"), args.get("sort"))
-        limit = max(1, min(int(args.get("limit") or 100), 1000))
+        limit = max(1, min(int(args.get("limit") or 100), 10000))
         job = api.call("POST", "/api/olx/jobs", {"url": query, "limit": limit, "photos": bool(args.get("photos"))})
         deadline = time.monotonic() + JOB_TIMEOUT
         while job["status"] in ("queued", "running"):
