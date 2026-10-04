@@ -30,8 +30,29 @@ class FakeResp(io.BytesIO):
         pass
 
 
+UZUM_REPORT = {"url": "https://uzum.uz/ru/search?query=mini%20pc", "title": "«mini pc»",
+               "fetched_at": "2026-10-05T10:00:00+00:00",
+               "filters": {"query": "mini pc", "sort": "BY_PRICE_ASC"},
+               "stats": {"items": 60, "total_on_site": 184, "with_price": 60,
+                         "price_uzs": {"min": 36000, "median": 2313655, "max": 13685740},
+                         "with_discount": 50, "avg_rating": 4.49},
+               "items": [{"id": i, "title": f"Mini PC {i}", "price": 177210, "price_card": 162890 if i == 0 else None,
+                          "price_full": 179000, "discount": 1, "rating": 4.6, "reviews": 206,
+                          "installment": "12 679 сум/мес", "delivery": "Завтра", "labels": ["Стало дешевле"],
+                          "url": f"https://uzum.uz/ru/product/{i}"} for i in range(60)]}
+
+
 class FakeHttp:
     """Имитирует API tools.oresh.in: задание сначала running, потом done."""
+
+    def uzum(self, path):
+        if path == "/api/uzum/jobs":
+            return {"id": "u1", "status": "running", "fetched": 0, "total": None}
+        if path == "/api/uzum/jobs/u1":
+            return {"id": "u1", "status": "done", "fetched": 60, "dump_id": "uzum_q_mini_pc-20261005-100000-abcdef"}
+        if path == "/api/uzum/dumps":
+            return [{"id": "uzum_q_mini_pc-20261005-100000-abcdef", **{k: v for k, v in UZUM_REPORT.items() if k != "items"}}]
+        return UZUM_REPORT
 
     def __init__(self, fail=None):
         self.calls, self.polls, self.fail = [], 0, fail
@@ -42,6 +63,8 @@ class FakeHttp:
         if self.fail:
             raise urllib.error.HTTPError(req.full_url, self.fail, "x", {}, io.BytesIO(b'{"detail": "boom"}'))
         path = req.full_url.split("tools.test", 1)[1]
+        if path.startswith("/api/uzum/"):
+            return FakeResp(json.dumps(self.uzum(path)).encode())
         if path == "/api/olx/jobs":
             data = {"id": "j1", "status": "queued", "fetched": 0}
         elif path == "/api/olx/jobs/j1":
@@ -83,7 +106,8 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(r["result"]["protocolVersion"], S.PROTOCOL_VERSIONS[0])
         self.assertIsNone(srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         names = [t["name"] for t in srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
-        self.assertEqual(names, ["olx_search", "olx_get_offers", "olx_list_dumps"])
+        self.assertEqual(names, ["olx_search", "olx_get_offers", "uzum_search", "uzum_get_items", "uzum_list_dumps",
+                                 "olx_list_dumps"])
         self.assertEqual(srv.handle({"jsonrpc": "2.0", "id": 3, "method": "nope"})["error"]["code"], -32601)
 
     def test_main_loop_over_stdio(self):
@@ -152,6 +176,39 @@ class ToolsTest(unittest.TestCase):
         self.assertIn("Неверные аргументы", msg)
         res, msg = call(srv, "nope", {})
         self.assertTrue(res["isError"])
+
+
+class UzumToolsTest(unittest.TestCase):
+    def test_search(self):
+        http = FakeHttp()
+        srv, sent = make(http)
+        res, out = call(srv, "uzum_search", {"query": " mini pc ", "limit": 60, "sort": "cheap"}, token="p")
+        self.assertNotIn("isError", res)
+        self.assertEqual(http.calls[0][:3], ("POST", "https://tools.test/api/uzum/jobs",
+                                             {"url": "mini pc", "limit": 60, "sort": "cheap", "photos": False}))
+        self.assertEqual(out["sort"], "BY_PRICE_ASC")
+        self.assertEqual(out["price_uzs"]["median"], "2 313 655")
+        self.assertEqual(len(out["items_list"]), 50)
+        self.assertIn("uzum_get_items", out["more"])
+        i = out["items_list"][0]
+        self.assertEqual((i["price"], i["price_card"], i["discount"], i["rating"]),
+                         ("177 210 сум", "162 890", "−1% от 179 000", "4.6 (206 отз.)"))
+        self.assertNotIn("price_card", out["items_list"][1])
+
+    def test_get_items_and_list(self):
+        srv, _ = make()
+        _, out = call(srv, "uzum_get_items", {"dump_id": "uzum_q_mini_pc-20261005-100000-abcdef", "offset": 50})
+        self.assertEqual(out["shown"], "50–60")
+        self.assertNotIn("more", out)
+        _, out = call(srv, "uzum_list_dumps", {})
+        self.assertEqual(out[0]["items"], 60)
+        self.assertEqual(out[0]["median_uzs"], "2 313 655")
+
+    def test_bad_sort(self):
+        srv, _ = make()
+        res, msg = call(srv, "uzum_search", {"query": "x", "sort": "random"})
+        self.assertTrue(res["isError"])
+        self.assertIn("popular", msg)
 
 
 class BuildQueryTest(unittest.TestCase):

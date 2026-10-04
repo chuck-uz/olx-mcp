@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "olx-mcp"
-version = "0.1.0"
-description = "MCP-сервер для Claude: поиск объявлений OLX.uz через парсер tools.oresh.in"
+version = "0.2.0"
+description = "MCP-сервер для Claude: поиск по OLX.uz и Uzum Market через парсеры tools.oresh.in"
 requires-python = ">=3.9"
 dependencies = []
 

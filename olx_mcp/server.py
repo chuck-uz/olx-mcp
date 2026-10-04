@@ -1,4 +1,4 @@
-"""MCP-сервер «olx»: поиск объявлений OLX.uz для Claude через парсер на tools.oresh.in.
+"""MCP-сервер «olx»: поиск по OLX.uz и Uzum Market для Claude через парсеры на tools.oresh.in.
 
 Сам ничего не парсит: ставит задание в API tools.oresh.in (там headless Chromium), ждёт и отдаёт
 Claude сводку и компактный список объявлений. Полная выгрузка остаётся на сервере, её можно
@@ -21,7 +21,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 PAGE = 50          # объявлений в одном ответе Claude
@@ -34,11 +34,15 @@ SORTS = {
     "expensive": "filter_float_price:desc",
 }
 
+UZUM_SORTS = ["popular", "cheap", "expensive", "rating", "new"]
+
 INSTRUCTIONS = (
     "Для любых запросов про объявления на OLX.uz (olx.uz) — найти, подобрать, сравнить цены, оценить рынок, "
-    "проверить продавцов — используй инструменты olx_*, а не веб-поиск и не загрузку страниц olx.uz: "
-    "сайт блокирует прямые запросы, а парсер отдаёт структурированные данные (цены в сумах, состояние, продавец). "
-    "Если пользователь прислал ссылку на список OLX с фильтрами — передай её как есть."
+    "проверить продавцов — используй инструменты olx_*, а для товаров Uzum Market (uzum.uz) — uzum_*, "
+    "а не веб-поиск и не загрузку страниц этих сайтов: они блокируют прямые запросы, а парсеры отдают "
+    "структурированные данные. OLX — частные объявления и б/у; Uzum — новые товары магазинов с ценой по карте, "
+    "скидкой, рассрочкой и рейтингом. Если просят сравнить рынок, можно собрать с обеих площадок. "
+    "Если пользователь прислал ссылку на список с фильтрами — передай её как есть."
 )
 
 TOOLS = [
@@ -85,6 +89,48 @@ TOOLS = [
             },
             "required": ["dump_id"],
         },
+    },
+    {
+        "name": "uzum_search",
+        "description": (
+            "Ищет товары на Uzum Market (uzum.uz, Узбекистан) через серверный парсер и возвращает сводку по ценам "
+            "и список товаров: цена, цена по карте Uzum, скидка от зачёркнутой цены, рассрочка, рейтинг, отзывы, "
+            "доставка. Используй для ЛЮБЫХ запросов про Uzum вместо веб-поиска. query — поисковый запрос или "
+            "ссылка на поиск/категорию uzum.uz с фильтрами. Сбор: ~10 с на проверку браузера + ~1 с на 100 товаров. "
+            "В ответе первые 50; остальные — через uzum_get_items с dump_id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Поисковый запрос или ссылка https://uzum.uz/ru/search?… / /category/…"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 100,
+                          "description": "Сколько товаров собрать, до 10 000"},
+                "sort": {"type": "string", "enum": UZUM_SORTS,
+                         "description": "popular — по числу заказов, cheap / expensive — по цене, rating — по рейтингу, "
+                                        "new — новинки. По умолчанию — как на сайте (по релевантности)"},
+                "photos": {"type": "boolean", "default": False, "description": "Включить ссылки на фото"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "uzum_get_items",
+        "description": "Дочитывает товары из собранной выгрузки Uzum (dump_id из uzum_search или uzum_list_dumps) порциями по 50.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dump_id": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "count": {"type": "integer", "minimum": 1, "maximum": 100, "default": PAGE},
+            },
+            "required": ["dump_id"],
+        },
+    },
+    {
+        "name": "uzum_list_dumps",
+        "description": "Список прошлых выгрузок Uzum на сервере: запрос, дата, число товаров, медиана цены.",
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
     },
     {
         "name": "olx_list_dumps",
@@ -185,6 +231,32 @@ def compact_offer(o: dict, full: bool = False) -> dict:
     return {k: v for k, v in item.items() if v not in (None, "", {})}
 
 
+def compact_item(i: dict) -> dict:
+    """Товар Uzum для ответа Claude."""
+    price = (fmt_num(i["price"]) + " сум") if i.get("price") else "—"
+    item = {
+        "id": i["id"], "title": i["title"], "price": price, "price_uzs": i.get("price"),
+        "price_card": fmt_num(i["price_card"]) if i.get("price_card") else None,
+        "discount": f"−{i['discount']}% от {fmt_num(i['price_full'])}" if i.get("discount") else None,
+        "rating": f"{i['rating']} ({i['reviews']} отз.)" if i.get("rating") else None,
+        "installment": i.get("installment"), "delivery": i.get("delivery"),
+        "labels": ", ".join(i.get("labels") or []) or None, "url": i["url"], "photos": i.get("photos"),
+    }
+    return {k: v for k, v in item.items() if v not in (None, "", [])}
+
+
+def uzum_summary(rep: dict, dump_id: str) -> dict:
+    s = rep["stats"]
+    pu = s.get("price_uzs")
+    return {
+        "dump_id": dump_id, "title": rep.get("title"), "query": rep["filters"].get("query"),
+        "source_url": rep["url"], "fetched_at": rep["fetched_at"], "sort": rep["filters"].get("sort"),
+        "items": s["items"], "total_on_site": s.get("total_on_site"),
+        "price_uzs": {k: fmt_num(v) for k, v in pu.items()} if pu else None,
+        "with_discount": s.get("with_discount"), "avg_rating": s.get("avg_rating"),
+    }
+
+
 def summary(rep: dict, dump_id: str) -> dict:
     s = rep["stats"]
     pu = s.get("price_uzs")
@@ -214,24 +286,28 @@ class Server:
                             "и добавьте его в настройки MCP-сервера olx")
         return self.api
 
-    def olx_search(self, args: dict, progress: Callable[[float, float | None, str], None]) -> dict:
+    def _run(self, kind: str, label: str, body: dict, limit: int, progress) -> tuple[str, dict]:
+        """Ставит задание парсеру и ждёт его, сообщая прогресс; возвращает dump_id и выгрузку."""
         api = self._need_api()
-        query = build_query(args["query"], args.get("price_from"), args.get("price_to"), args.get("sort"))
-        limit = max(1, min(int(args.get("limit") or 100), 10000))
-        job = api.call("POST", "/api/olx/jobs", {"url": query, "limit": limit, "photos": bool(args.get("photos"))})
+        job = api.call("POST", f"/api/{kind}/jobs", body)
         deadline = time.monotonic() + JOB_TIMEOUT
         while job["status"] in ("queued", "running"):
             if time.monotonic() > deadline:
                 raise ToolError(f"Сбор не уложился в {JOB_TIMEOUT // 60} минут (задание {job['id']})")
             self.sleep(1.5)
-            job = api.call("GET", f"/api/olx/jobs/{job['id']}")
+            job = api.call("GET", f"/api/{kind}/jobs/{job['id']}")
             goal = min(limit, job.get("total") or limit)
             progress(job.get("fetched", 0), goal,
                      "В очереди" if job["status"] == "queued" else f"Собрано {job.get('fetched', 0)} из {goal}")
         if job["status"] == "error":
-            raise ToolError(f"Парсер OLX: {job.get('error')}")
-        dump_id = job["dump_id"]
-        rep = api.call("GET", f"/api/olx/dumps/{dump_id}")
+            raise ToolError(f"Парсер {label}: {job.get('error')}")
+        return job["dump_id"], api.call("GET", f"/api/{kind}/dumps/{job['dump_id']}")
+
+    def olx_search(self, args: dict, progress: Callable[[float, float | None, str], None]) -> dict:
+        query = build_query(args["query"], args.get("price_from"), args.get("price_to"), args.get("sort"))
+        limit = max(1, min(int(args.get("limit") or 100), 10000))
+        dump_id, rep = self._run("olx", "OLX", {"url": query, "limit": limit, "photos": bool(args.get("photos"))},
+                                 limit, progress)
         out = summary(rep, dump_id)
         out["shown"] = f"0–{min(PAGE, len(rep['offers']))} из {len(rep['offers'])}"
         if len(rep["offers"]) > PAGE:
@@ -254,6 +330,44 @@ class Server:
         if off + cnt < len(rep["offers"]):
             out["more"] = f"olx_get_offers(dump_id='{dump_id}', offset={off + cnt})"
         return out
+
+    def uzum_search(self, args: dict, progress) -> dict:
+        sort = args.get("sort")
+        if sort and sort not in UZUM_SORTS:
+            raise ToolError(f"sort: одно из {', '.join(UZUM_SORTS)}")
+        limit = max(1, min(int(args.get("limit") or 100), 10000))
+        dump_id, rep = self._run("uzum", "Uzum", {"url": args["query"].strip(), "limit": limit, "sort": sort,
+                                                  "photos": bool(args.get("photos"))}, limit, progress)
+        out = uzum_summary(rep, dump_id)
+        out["shown"] = f"0–{min(PAGE, len(rep['items']))} из {len(rep['items'])}"
+        if len(rep["items"]) > PAGE:
+            out["more"] = f"uzum_get_items(dump_id='{dump_id}', offset={PAGE})"
+        out["items_list"] = [compact_item(i) for i in rep["items"][:PAGE]]
+        return out
+
+    def uzum_get_items(self, args: dict, progress) -> dict:
+        api = self._need_api()
+        dump_id = str(args["dump_id"])
+        if not all(c.isalnum() or c in "_-" for c in dump_id):
+            raise ToolError("Некорректный dump_id")
+        rep = api.call("GET", f"/api/uzum/dumps/{dump_id}")
+        off = max(0, int(args.get("offset") or 0))
+        cnt = max(1, min(int(args.get("count") or PAGE), 100))
+        part = rep["items"][off:off + cnt]
+        out = {"dump_id": dump_id, "title": rep.get("title"), "total": len(rep["items"]),
+               "shown": f"{off}–{off + len(part)}", "items_list": [compact_item(i) for i in part]}
+        if off + cnt < len(rep["items"]):
+            out["more"] = f"uzum_get_items(dump_id='{dump_id}', offset={off + cnt})"
+        return out
+
+    def uzum_list_dumps(self, args: dict, progress) -> list:
+        api = self._need_api()
+        lim = max(1, min(int(args.get("limit") or 20), 100))
+        return [{"dump_id": d["id"], "title": d.get("title"), "query": (d.get("filters") or {}).get("query"),
+                 "fetched_at": d["fetched_at"], "items": d["stats"]["items"],
+                 "median_uzs": fmt_num(d["stats"]["price_uzs"]["median"]) if d["stats"].get("price_uzs") else None,
+                 "url": d.get("url")}
+                for d in api.call("GET", "/api/uzum/dumps")[:lim]]
 
     def olx_list_dumps(self, args: dict, progress) -> list:
         api = self._need_api()
