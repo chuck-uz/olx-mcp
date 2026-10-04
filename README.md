@@ -31,11 +31,14 @@ OLX отдаёт не больше 1000 объявлений на один по�
 
 ## Установка
 
-1. **Токен.** На сервере tools создать токен и добавить его хэш в `API_TOKEN_HASHES` (см. README Tools, раздел
+Сервер tools.oresh.in личный: для работы нужен токен от его владельца. Если токен вам уже выдали,
+пропустите шаг 1.
+
+1. **Токен** (делает владелец сервера). На сервере tools создать именной токен и добавить строку `имя:хэш` в `API_TOKEN_HASHES` (см. README Tools, раздел
    «Вход и токены»), перезапустить контейнер:
 
    ```bash
-   ssh oresh 'sudo docker exec tools python -m app.auth new-token'
+   ssh oresh 'sudo docker exec tools python -m app.auth new-token <имя>'
    ```
 
 2. **Код.**
