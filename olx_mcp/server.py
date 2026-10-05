@@ -21,7 +21,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 PAGE = 50          # объявлений в одном ответе Claude
@@ -36,13 +36,20 @@ SORTS = {
 
 UZUM_SORTS = ["popular", "cheap", "expensive", "rating", "new"]
 
+try:  # запуск как пакета (olx_mcp.server) и как файла (python server.py)
+    from olx_mcp import avtoelon
+except ImportError:  # pragma: no cover
+    import avtoelon
+
 INSTRUCTIONS = (
     "Для любых запросов про объявления на OLX.uz (olx.uz) — найти, подобрать, сравнить цены, оценить рынок, "
     "проверить продавцов — используй инструменты olx_*, а для товаров Uzum Market (uzum.uz) — uzum_*, "
     "а не веб-поиск и не загрузку страниц этих сайтов: они блокируют прямые запросы, а парсеры отдают "
     "структурированные данные. OLX — частные объявления и б/у; Uzum — новые товары магазинов с ценой по карте, "
     "скидкой, рассрочкой и рейтингом. Если просят сравнить рынок, можно собрать с обеих площадок. "
-    "Если пользователь прислал ссылку на список с фильтрами — передай её как есть."
+    "Если пользователь прислал ссылку на список с фильтрами — передай её как есть. "
+    "Для машин (купить авто, цены на Cobalt, Gentra и т.п.) используй avtoelon_* — крупнейшую площадку "
+    "авто-объявлений Узбекистана; машины на OLX тоже есть (olx_search), для полной картины можно собрать с обеих."
 )
 
 TOOLS = [
@@ -129,6 +136,44 @@ TOOLS = [
     {
         "name": "uzum_list_dumps",
         "description": "Список прошлых выгрузок Uzum на сервере: запрос, дата, число товаров, медиана цены.",
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
+    },
+    {
+        "name": "avtoelon_search",
+        "description": (
+            "Ищет объявления о продаже машин на avtoelon.uz (Узбекистан): цена в у.е., год, пробег, двигатель, "
+            "топливо, кузов, КПП, город, дата, «торг». Используй для ЛЮБЫХ запросов про покупку/цены машин. "
+            "query — марка и модель латиницей («chevrolet cobalt», «byd song plus») или ссылка avtoelon.uz с фильтрами. "
+            "Работает с компьютера пользователя: сайт показывает объявления только узбекским IP. "
+            "~1 с на 20 объявлений. В ответе первые 50; остальные — avtoelon_get_items. "
+            "Объявления с полем rent — аренда/лизинг: их цена не рыночная, не считай их выгодными."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Марка и модель латиницей или ссылка https://avtoelon.uz/avto/…"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": avtoelon.MAX_ITEMS, "default": 100},
+                "price_from": {"type": "number", "description": "Цена от, у.е. (USD)"},
+                "price_to": {"type": "number", "description": "Цена до, у.е. (USD)"},
+                "year_from": {"type": "integer"}, "year_to": {"type": "integer"},
+                "sort": {"type": "string", "enum": list(avtoelon.SORTS),
+                         "description": "new — свежие, cheap / expensive — по цене, year_new / year_old — по году"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "avtoelon_get_items",
+        "description": "Дочитывает объявления из сохранённой выгрузки avtoelon (dump_id) порциями по 50; full=true — с полным описанием.",
+        "inputSchema": {"type": "object", "properties": {
+            "dump_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "count": {"type": "integer", "minimum": 1, "maximum": 100, "default": PAGE},
+            "full": {"type": "boolean", "default": False}}, "required": ["dump_id"]},
+    },
+    {
+        "name": "avtoelon_list_dumps",
+        "description": "Прошлые выгрузки avtoelon (хранятся на этом компьютере в ~/.olx-mcp/avtoelon).",
         "inputSchema": {"type": "object", "properties": {
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
     },
@@ -245,6 +290,24 @@ def compact_item(i: dict) -> dict:
     return {k: v for k, v in item.items() if v not in (None, "", [])}
 
 
+def compact_car(i: dict, full: bool = False) -> dict:
+    """Объявление avtoelon для ответа Claude."""
+    specs = ", ".join(x for x in [f"{i['engine_l']} л" if i.get("engine_l") else None, i.get("fuel"),
+                                   i.get("gearbox"), i.get("body")] if x)
+    desc = i.get("description") or ""
+    item = {
+        "id": i["id"], "title": i["title"], "price": i.get("price") or (f"{fmt_num(i['price_usd'])} y.e." if i.get("price_usd") else "—"),
+        "price_usd": i.get("price_usd"), "year": i.get("year"),
+        "mileage": f"{fmt_num(i['mileage_km'])} км" if i.get("mileage_km") else None, "specs": specs or None,
+        "city": i.get("city"), "date": i.get("date"), "bargain": True if i.get("bargain") else None,
+        "rent": f"аренда {fmt_num(i['rent_usd_month'])} y.e./мес — цена не рыночная" if i.get("rent_usd_month") else None,
+        "badges": ", ".join(b for b in i.get("badges") or [] if "торг" not in b.lower()) or None,
+        "description": desc if full or len(desc) <= TEXT_CUT else desc[:TEXT_CUT].rstrip() + "…",
+        "url": i["url"], "photo": i.get("photo") if full else None,
+    }
+    return {k: v for k, v in item.items() if v not in (None, "", [])}
+
+
 def uzum_summary(rep: dict, dump_id: str) -> dict:
     s = rep["stats"]
     pu = s.get("price_uzs")
@@ -277,6 +340,7 @@ class Server:
     def __init__(self, api: Api | None, send: Callable[[dict], None],
                  sleep: Callable[[float], None] = time.sleep):
         self.api, self.send, self.sleep = api, send, sleep
+        self.avtoelon_get = avtoelon.http_get  # в тестах подменяется
 
     # ---------- инструменты ----------
 
@@ -368,6 +432,45 @@ class Server:
                  "median_uzs": fmt_num(d["stats"]["price_uzs"]["median"]) if d["stats"].get("price_uzs") else None,
                  "url": d.get("url")}
                 for d in api.call("GET", "/api/uzum/dumps")[:lim]]
+
+    def avtoelon_search(self, args: dict, progress) -> dict:
+        try:
+            url = avtoelon.build_url(args["query"], args.get("price_from"), args.get("price_to"),
+                                     args.get("year_from"), args.get("year_to"), args.get("sort"))
+            limit = max(1, min(int(args.get("limit") or 100), avtoelon.MAX_ITEMS))
+            items, total = avtoelon.fetch(url, limit, sleep=self.sleep, get=self.avtoelon_get,
+                                          progress=lambda n, t: progress(n, min(limit, t or limit),
+                                                                         f"Собрано {n} из {min(limit, t or limit)}"))
+        except avtoelon.AvtoelonError as e:
+            raise ToolError(str(e)) from None
+        rep = avtoelon.build_report(items, url, total)
+        dump_id = avtoelon.save(rep)
+        s = rep["stats"]
+        out = {"dump_id": dump_id, "source_url": url, "items": s["items"], "total_on_site": total,
+               "price_usd": {k: fmt_num(v) for k, v in s["price_usd"].items()} if s["price_usd"] else None,
+               "years": s["years"], "with_bargain": s["with_bargain"], "with_rent": s.get("with_rent"),
+               "shown": f"0–{min(PAGE, len(items))} из {len(items)}"}
+        if len(items) > PAGE:
+            out["more"] = f"avtoelon_get_items(dump_id='{dump_id}', offset={PAGE})"
+        out["items_list"] = [compact_car(i) for i in items[:PAGE]]
+        return out
+
+    def avtoelon_get_items(self, args: dict, progress) -> dict:
+        try:
+            rep = avtoelon.load(str(args["dump_id"]))
+        except avtoelon.AvtoelonError as e:
+            raise ToolError(str(e)) from None
+        off = max(0, int(args.get("offset") or 0))
+        cnt = max(1, min(int(args.get("count") or PAGE), 100))
+        part = rep["items"][off:off + cnt]
+        out = {"dump_id": args["dump_id"], "total": len(rep["items"]), "shown": f"{off}–{off + len(part)}",
+               "items_list": [compact_car(i, full=bool(args.get("full"))) for i in part]}
+        if off + cnt < len(rep["items"]):
+            out["more"] = f"avtoelon_get_items(dump_id='{args['dump_id']}', offset={off + cnt})"
+        return out
+
+    def avtoelon_list_dumps(self, args: dict, progress) -> list:
+        return avtoelon.list_dumps(max(1, min(int(args.get("limit") or 20), 100)))
 
     def olx_list_dumps(self, args: dict, progress) -> list:
         api = self._need_api()
