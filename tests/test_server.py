@@ -3,7 +3,7 @@ import json
 import unittest
 import urllib.error
 
-from olx_mcp import server as S
+from uzparser import server as S
 
 
 def offer(i, uzs=5_000_000):
@@ -43,7 +43,7 @@ UZUM_REPORT = {"url": "https://uzum.uz/ru/search?query=mini%20pc", "title": "«m
 
 
 class FakeHttp:
-    """Имитирует API tools.oresh.in: задание сначала running, потом done."""
+    """Имитирует API сервера парсеров: задание сначала running, потом done."""
 
     def uzum(self, path):
         if path == "/api/uzum/jobs":
@@ -165,13 +165,13 @@ class ToolsTest(unittest.TestCase):
     def test_errors_are_tool_results(self):
         srv, _ = make(token=False)
         res, msg = call(srv, "olx_search", {"query": "x"})
-        self.assertTrue(res["isError"]) and self.assertIn("OLX_MCP_TOKEN", msg)
+        self.assertTrue(res["isError"]) and self.assertIn("UZPARSER_TOKEN", msg)
         srv, _ = make(FakeHttp(fail=401))
         res, msg = call(srv, "olx_list_dumps", {})
         self.assertIn("токен", msg)
         srv, _ = make(FakeHttp(fail=400))
         res, msg = call(srv, "olx_search", {"query": "x"})
-        self.assertEqual(msg, "tools.oresh.in ответил 400: boom")
+        self.assertEqual(msg, "Сервер парсеров ответил 400: boom")
         res, msg = call(srv, "olx_search", {})
         self.assertIn("Неверные аргументы", msg)
         res, msg = call(srv, "nope", {})

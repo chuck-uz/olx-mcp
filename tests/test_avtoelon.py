@@ -3,8 +3,8 @@ import os
 import tempfile
 import unittest
 
-from olx_mcp import avtoelon as A
-from olx_mcp import server as S
+from uzparser import avtoelon as A
+from uzparser import server as S
 
 
 def card(aid, title, price, year, desc, city="Ташкент", bargain=False, badge=None, brand="Chevrolet", model="Cobalt",
@@ -121,15 +121,15 @@ class ParseTest(unittest.TestCase):
 class ToolTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ["OLX_MCP_DATA"] = self.tmp.name
+        os.environ["UZPARSER_DATA"] = self.tmp.name
 
     def tearDown(self):
-        os.environ.pop("OLX_MCP_DATA", None)
+        os.environ.pop("UZPARSER_DATA", None)
         self.tmp.cleanup()
 
     def test_search_without_token_and_paging(self):
         sent = []
-        srv = S.Server(None, sent.append, sleep=lambda s: None)  # токен tools.oresh.in не нужен
+        srv = S.Server(None, sent.append, sleep=lambda s: None)  # токен сервера парсеров не нужен
         srv.avtoelon_get = FakeSite(total=70)
         r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "avtoelon_search", "arguments": {"query": "chevrolet cobalt", "limit": 70, "sort": "cheap"},

@@ -1,6 +1,6 @@
 """Парсер avtoelon.uz — объявления о продаже машин в Узбекистане.
 
-Работает прямо с машины пользователя, а не через tools.oresh.in: avtoelon отдаёт объявления только
+Работает прямо с машины пользователя, а не через сервер парсеров: avtoelon отдаёт объявления только
 узбекским IP (с сервера в США — 404). Защиты от ботов нет, страницы — обычный HTML, поэтому хватает urllib.
 
 Каждая карточка в выдаче — HTML (цена, год, описание, город, дата) плюс JSON в listing.items.push(...)
@@ -34,7 +34,12 @@ class AvtoelonError(Exception):
 
 
 def data_dir() -> Path:
-    d = Path(os.environ.get("OLX_MCP_DATA") or Path.home() / ".olx-mcp") / "avtoelon"
+    base = os.environ.get("UZPARSER_DATA") or os.environ.get("OLX_MCP_DATA")
+    if not base:
+        base, old = Path.home() / ".uzparser", Path.home() / ".olx-mcp"
+        if old.exists() and not base.exists():  # проект переименован: переносим старые выгрузки
+            old.rename(base)
+    d = Path(base) / "avtoelon"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
