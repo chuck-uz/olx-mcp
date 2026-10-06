@@ -22,12 +22,14 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 DEFAULT_URL = "https://tools.oresh.in"  # сервер парсеров OLX/Uzum
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 PAGE = 50          # объявлений в одном ответе Claude
 TEXT_CUT = 200     # символов описания в компактном виде
+MULTI_CUT = 1500   # у объявлений с несколькими позициями описание нужно целиком — там цены
+MULTI_NOTE = "несколько позиций или конфигураций с разными ценами — разбери по описанию; цена объявления — только одна из них"
 JOB_TIMEOUT = 1800  # 1000 объявлений ≈ 40 с, 10 000 ≈ 7 минут, плюс очередь
 
 SORTS = {
@@ -62,7 +64,10 @@ TOOLS = [
             "и список объявлений. Используй для ЛЮБЫХ запросов про OLX вместо веб-поиска. "
             "query — поисковый запрос («iphone 15 pro», «chevrolet cobalt») или ссылка на список olx.uz "
             "с уже выставленными фильтрами (категория, город, цена). Сбор занимает ~10 с на 100 объявлений. "
-            "В ответе первые 50 объявлений; остальные — через olx_get_offers с dump_id."
+            "В ответе первые 50 объявлений; остальные — через olx_get_offers с dump_id. "
+            "Объявления с полем multi — магазины с ассортиментом или «конфигурация на выбор»: в описании "
+            "несколько товаров со своими ценами. Разбирай их по описанию и не считай цену объявления ценой "
+            "всего, что в нём перечислено; медиана в сводке посчитана без них."
         ),
         "inputSchema": {
             "type": "object",
@@ -269,12 +274,15 @@ def compact_offer(o: dict, full: bool = False) -> dict:
         "promoted": o.get("promoted") or None,
         "url": o["url"],
     }
+    if o.get("multi"):
+        item["multi"] = MULTI_NOTE
     if full:
         item.update(params=o.get("params"), text=text, photos=o.get("photos"))
     else:
         if o.get("params"):
             item["params"] = "; ".join(f"{k}: {v}" for k, v in list(o["params"].items())[:8])
-        item["text"] = text if len(text) <= TEXT_CUT else text[:TEXT_CUT].rstrip() + "…"
+        cut = MULTI_CUT if o.get("multi") else TEXT_CUT
+        item["text"] = text if len(text) <= cut else text[:cut].rstrip() + "…"
     return {k: v for k, v in item.items() if v not in (None, "", {})}
 
 
@@ -334,6 +342,8 @@ def summary(rep: dict, dump_id: str) -> dict:
         "with_price": s["with_price"],
         "price_uzs": {k: fmt_num(v) for k, v in pu.items()} if pu else None,
         "currencies": s.get("currencies"), "business_sellers": s.get("business"),
+        "multi_item_offers": (f"{s['multi']} — с несколькими позициями в описании, в медиану не входят"
+                              if s.get("multi") else None),
         "dates": f"{s.get('from')} — {s.get('to')}",
     }
 

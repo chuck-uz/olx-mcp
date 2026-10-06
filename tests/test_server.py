@@ -229,5 +229,20 @@ class BuildQueryTest(unittest.TestCase):
             S.build_query("x", sort="random")
 
 
+class MultiTest(unittest.TestCase):
+    def test_multi_offer_keeps_long_text_and_note(self):
+        plain = S.compact_offer(offer(1))
+        self.assertNotIn("multi", plain)
+        self.assertEqual(len(plain["text"]), S.TEXT_CUT + 1)  # обрезано + «…»
+        multi = S.compact_offer({**offer(2), "multi": True})
+        self.assertEqual(multi["multi"], S.MULTI_NOTE)
+        self.assertEqual(len(multi["text"]), 500)  # целиком: цены позиций в описании
+
+    def test_summary_counts_multi(self):
+        self.assertIsNone(S.summary(REPORT, "d")["multi_item_offers"])
+        rep = {**REPORT, "stats": {**REPORT["stats"], "multi": 7}}
+        self.assertTrue(S.summary(rep, "d")["multi_item_offers"].startswith("7 "))
+
+
 if __name__ == "__main__":
     unittest.main()
