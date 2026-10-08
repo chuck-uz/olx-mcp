@@ -1,4 +1,5 @@
-"""uzParser — MCP-сервер для Claude: поиск по OLX.uz, Uzum Market, Яндекс Маркету (market.yandex.uz) и avtoelon.uz.
+"""uzParser — MCP-сервер для Claude: поиск по OLX.uz, Uzum Market, Яндекс Маркету (market.yandex.uz), avtoelon.uz
+и магазинам техники (idea, alifshop, texnomart, mediapark, olcha).
 
 OLX и Uzum собирает сервер парсеров (там headless Chromium): MCP ставит задание в его API, ждёт и отдаёт
 Claude сводку и компактный список объявлений. Полная выгрузка остаётся на сервере, её можно
@@ -24,7 +25,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 DEFAULT_URL = "https://tools.oresh.in"  # сервер парсеров OLX/Uzum
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -33,7 +34,7 @@ TEXT_CUT = 200     # символов описания в компактном �
 MULTI_CUT = 1500   # у объявлений с несколькими позициями описание нужно целиком — там цены
 MULTI_NOTE = "несколько позиций или конфигураций с разными ценами — разбери по описанию; цена объявления — только одна из них"
 JOB_TIMEOUT = 1800  # 1000 объявлений ≈ 40 с, 10 000 ≈ 7 минут, плюс очередь
-SEARCH_TOOLS = ("olx_search", "uzum_search", "avtoelon_search", "yandex_search")
+SEARCH_TOOLS = ("olx_search", "uzum_search", "avtoelon_search", "yandex_search", "shops_search")
 DEFAULT_PROGRESS_DIR = os.path.join(os.path.expanduser("~"), ".cache", "uzparser", "progress")
 
 SORTS = {
@@ -45,9 +46,10 @@ SORTS = {
 UZUM_SORTS = ["popular", "cheap", "expensive", "rating", "new"]
 
 try:  # запуск как пакета (uzparser.server) и как файла (python server.py)
-    from uzparser import avtoelon, yandex
+    from uzparser import avtoelon, shops, yandex
 except ImportError:  # pragma: no cover
     import avtoelon
+    import shops
     import yandex
 
 INSTRUCTIONS = (
@@ -61,7 +63,10 @@ INSTRUCTIONS = (
     "авто-объявлений Узбекистана; машины на OLX тоже есть (olx_search), для полной картины можно собрать с обеих. "
     "Для Яндекс Маркета (market.yandex.uz, «Market Yandex Go») — yandex_*. Там почти всё везут продавцы из России "
     "(cross_border: доставка из-за рубежа, 1–3 недели, цены часто заметно выше, чем на Uzum и OLX); товары со складов "
-    "в Узбекистане приезжают за 1–3 дня. Всегда разделяй эти группы и называй срок доставки, когда советуешь."
+    "в Узбекистане приезжают за 1–3 дня. Всегда разделяй эти группы и называй срок доставки, когда советуешь. "
+    "Для новой техники с официальной гарантией и рассрочкой — shops_search: сразу пять магазинов Узбекистана "
+    "(idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz). Когда просят «где купить», «сравни цены», "
+    "«найди дешевле» на технику — собирай и магазины, и Uzum, и OLX (б/у), и Яндекс Маркет (с пометкой о доставке)."
 )
 
 TOOLS = [
@@ -235,6 +240,52 @@ TOOLS = [
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
     },
     {
+        "name": "shops_search",
+        "description": (
+            "Ищет новую технику сразу в пяти магазинах Узбекистана — idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, "
+            "olcha.uz — и возвращает общую таблицу от дешёвых к дорогим (сначала то, что в наличии): цена, старая цена, "
+            "скидка, рассрочка, наличие, продавец (alifshop), гарантия, рейтинг, ссылка. Всё со складов в Узбекистане. "
+            "Поиск магазинов нечёткий, поэтому по умолчанию (strict) остаются только товары, в названии которых есть "
+            "все слова запроса: пиши так, как товар называется в каталоге — бренд и модель («mac mini m4», «iphone 15», "
+            "«samsung s24», «redmi note 14»), без лишних слов. Если у магазина 0 совпадений, в сводке shops есть "
+            "unmatched_examples — что он нашёл вместо этого; можно повторить с другими словами или strict=false. "
+            "~5–10 с. Работает с компьютера пользователя, токен не нужен."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Бренд и модель или название товара"},
+                "shops": {"type": "array", "items": {"type": "string", "enum": list(shops.SHOPS)},
+                          "description": "Какие магазины опросить; по умолчанию все пять"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": shops.PER_SHOP_MAX, "default": 30,
+                          "description": "Сколько совпавших товаров брать с каждого магазина"},
+                "price_from": {"type": "number", "description": "Цена от, в сумах"},
+                "price_to": {"type": "number", "description": "Цена до, в сумах"},
+                "strict": {"type": "boolean", "default": True,
+                           "description": "Только товары со всеми словами запроса в названии"},
+                "max_pages": {"type": "integer", "minimum": 1, "maximum": 20, "default": shops.MAX_PAGES,
+                              "description": "Сколько страниц выдачи листать в каждом магазине"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "shops_get_items",
+        "description": "Дочитывает товары из сохранённой выгрузки shops_search (dump_id) порциями по 50; "
+                       "shop — только один магазин; full=true — с характеристиками.",
+        "inputSchema": {"type": "object", "properties": {
+            "dump_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "count": {"type": "integer", "minimum": 1, "maximum": 100, "default": PAGE},
+            "shop": {"type": "string", "enum": list(shops.SHOPS)},
+            "full": {"type": "boolean", "default": False}}, "required": ["dump_id"]},
+    },
+    {
+        "name": "shops_list_dumps",
+        "description": "Прошлые поиски по магазинам техники (хранятся на этом компьютере в ~/.uzparser/shops).",
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
+    },
+    {
         "name": "olx_list_dumps",
         "description": "Список прошлых выгрузок OLX на сервере: запрос, дата, число объявлений, медиана цены.",
         "inputSchema": {"type": "object", "properties": {
@@ -393,6 +444,23 @@ def compact_ym(i: dict, full: bool = False) -> dict:
     return {k: v for k, v in item.items() if v not in (None, "", [], {})}
 
 
+def compact_shop(i: dict, full: bool = False) -> dict:
+    """Товар магазина техники для ответа Claude."""
+    item = {
+        "shop": shops.NAMES.get(i["shop"], i["shop"]), "title": i["title"],
+        "price": (fmt_num(i["price"]) + " сум") if i.get("price") else "—", "price_uzs": i.get("price"),
+        "was": (fmt_num(i["price_old"]) + " сум") if i.get("price_old") else None,
+        "discount": f"{i['discount']}%" if i.get("discount") else None,
+        "in_stock": {True: "да", False: "нет"}.get(i.get("in_stock")),
+        "stock_qty": i.get("stock_qty"), "installment": i.get("installment"),
+        "rating": f"{i['rating']} ({i.get('reviews') or 0})" if i.get("rating") else None,
+        "seller": i.get("seller"), "warranty": i.get("warranty"),
+        "specs": i.get("specs") if full else None, "category": i.get("category") if full else None,
+        "url": i.get("url"),
+    }
+    return {k: v for k, v in item.items() if v not in (None, "", [], {})}
+
+
 def ym_group(g: dict) -> dict:
     pu = g.get("price_uzs")
     return {"items": g["items"], "price_uzs": {k: fmt_num(v) for k, v in pu.items()} if pu else None,
@@ -483,6 +551,7 @@ class Server:
         self._calls = 0
         self.avtoelon_get = avtoelon.http_get  # в тестах подменяется
         self.yandex_get = None                 # None — urllib с куками (yandex.Http); в тестах подменяется
+        self.shops_get = shops.http_json       # в тестах подменяется
 
     # ---------- инструменты ----------
 
@@ -659,6 +728,45 @@ class Server:
 
     def yandex_list_dumps(self, args: dict, progress) -> list:
         return yandex.list_dumps(max(1, min(int(args.get("limit") or 20), 100)))
+
+    def shops_search(self, args: dict, progress) -> dict:
+        try:
+            rep = shops.search(args["query"], args.get("shops"), int(args.get("limit") or 30),
+                               int(args.get("max_pages") or shops.MAX_PAGES), args.get("strict", True) is not False,
+                               args.get("price_from"), args.get("price_to"), get=self.shops_get, sleep=self.sleep,
+                               progress=progress)
+        except shops.ShopsError as e:
+            raise ToolError(str(e)) from None
+        dump_id = shops.save(rep)
+        s, items = rep["stats"], rep["items"]
+        fmt = lambda p: {k: fmt_num(v) for k, v in p.items()} if p else None  # noqa: E731
+        out = {"dump_id": dump_id, "query": rep["query"], "items": s["items"], "in_stock": s["in_stock"],
+               "price_uzs": fmt(s["price_uzs"]), "price_in_stock_uzs": fmt(s["price_in_stock_uzs"]),
+               "shops": [{k: (fmt(v) if k == "price_uzs" else v) for k, v in sh.items() if v not in (None, [])}
+                         for sh in s["shops"]],
+               "shown": f"0–{min(PAGE, len(items))} из {len(items)}"}
+        if len(items) > PAGE:
+            out["more"] = f"shops_get_items(dump_id='{dump_id}', offset={PAGE})"
+        out["items_list"] = [compact_shop(i) for i in items[:PAGE]]
+        return out
+
+    def shops_get_items(self, args: dict, progress) -> dict:
+        try:
+            rep = shops.load(str(args["dump_id"]))
+        except shops.ShopsError as e:
+            raise ToolError(str(e)) from None
+        rows = [i for i in rep["items"] if i["shop"] == args["shop"]] if args.get("shop") else rep["items"]
+        off = max(0, int(args.get("offset") or 0))
+        cnt = max(1, min(int(args.get("count") or PAGE), 100))
+        part = rows[off:off + cnt]
+        out = {"dump_id": args["dump_id"], "total": len(rows), "shown": f"{off}–{off + len(part)}",
+               "items_list": [compact_shop(i, full=bool(args.get("full"))) for i in part]}
+        if off + cnt < len(rows):
+            out["more"] = f"shops_get_items(dump_id='{args['dump_id']}', offset={off + cnt})"
+        return out
+
+    def shops_list_dumps(self, args: dict, progress) -> list:
+        return shops.list_dumps(max(1, min(int(args.get("limit") or 20), 100)))
 
     def olx_list_dumps(self, args: dict, progress) -> list:
         api = self._need_api()
