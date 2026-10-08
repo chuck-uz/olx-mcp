@@ -244,5 +244,36 @@ class MultiTest(unittest.TestCase):
         self.assertTrue(S.summary(rep, "d")["multi_item_offers"].startswith("7 "))
 
 
+class ProgressFileTest(unittest.TestCase):
+    def test_search_writes_progress_and_cleans_up(self):
+        import os, tempfile
+        d = tempfile.mkdtemp()
+        seen = []
+        http = FakeHttp()
+        srv = S.Server(S.Api("https://tools.test/", "tok", opener=http), lambda m: None,
+                       sleep=lambda s: seen.extend(json.load(open(os.path.join(d, f))) for f in os.listdir(d)),
+                       progress_dir=d)
+        res = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "olx_search", "arguments": {"query": "iphone 15", "limit": 120}}})
+        self.assertNotIn("isError", res["result"])
+        self.assertTrue(seen)
+        self.assertEqual(seen[0]["tool"], "olx_search")
+        self.assertEqual(seen[0]["query"], "iphone 15")
+        self.assertEqual(os.listdir(d), [])  # по завершении файл удалён
+
+    def test_non_search_tools_and_no_dir_write_nothing(self):
+        import os, tempfile
+        d = tempfile.mkdtemp()
+        srv = S.Server(S.Api("https://tools.test/", "tok", opener=FakeHttp()), lambda m: None,
+                       sleep=lambda s: None, progress_dir=d)
+        srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "olx_list_dumps", "arguments": {}}})
+        self.assertEqual(os.listdir(d), [])
+        f = S.ProgressFile(None, "olx_search", {"query": "x"}, 1)
+        f.update(5, 10, "Собрано 5 из 10")
+        f.remove()
+        self.assertIsNone(f.path)
+
+
 if __name__ == "__main__":
     unittest.main()

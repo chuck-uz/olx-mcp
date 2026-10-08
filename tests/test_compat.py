@@ -33,7 +33,7 @@ class CompatTest(unittest.TestCase):
                 captured = {}
                 orig = S.Server.__init__
 
-                def spy(self, api, send, sleep=None):
+                def spy(self, api, send, sleep=None, **kw):
                     captured["api"] = api
                     orig(self, api, send)
                 S.Server.__init__ = spy

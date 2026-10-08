@@ -10,6 +10,8 @@ Claude сводку и компактный список объявлений. �
   UZPARSER_TOKEN  API-токен сервера парсеров (выдаёт его владелец) — нужен для OLX и Uzum
   (старые имена OLX_MCP_TOKEN / OLX_MCP_URL тоже понимаются)
   UZPARSER_URL    адрес сервера парсеров
+  UZPARSER_PROGRESS_DIR  куда писать прогресс поисков (по умолчанию ~/.cache/uzparser/progress;
+                  пустая строка — не писать). Его читает мод uzparser-progress для Claude Code.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 DEFAULT_URL = "https://tools.oresh.in"  # сервер парсеров OLX/Uzum
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -31,6 +33,8 @@ TEXT_CUT = 200     # символов описания в компактном �
 MULTI_CUT = 1500   # у объявлений с несколькими позициями описание нужно целиком — там цены
 MULTI_NOTE = "несколько позиций или конфигураций с разными ценами — разбери по описанию; цена объявления — только одна из них"
 JOB_TIMEOUT = 1800  # 1000 объявлений ≈ 40 с, 10 000 ≈ 7 минут, плюс очередь
+SEARCH_TOOLS = ("olx_search", "uzum_search", "avtoelon_search")
+DEFAULT_PROGRESS_DIR = os.path.join(os.path.expanduser("~"), ".cache", "uzparser", "progress")
 
 SORTS = {
     "new": "created_at:desc",
@@ -348,10 +352,58 @@ def summary(rep: dict, dump_id: str) -> dict:
     }
 
 
+class ProgressFile:
+    """Прогресс одного поиска в файле <dir>/<pid>-<n>.json — для мода uzparser-progress.
+
+    Пишется атомарно (через os.replace), удаляется по завершении. Ошибки записи
+    глотаются: прогресс — подсказка, поиск из-за него падать не должен.
+    """
+
+    def __init__(self, directory: str | None, tool: str, args: dict, n: int):
+        self.path = os.path.join(directory, f"{os.getpid()}-{n}.json") if directory else None
+        now = int(time.time() * 1000)
+        self.data = {"tool": tool, "query": str(args.get("query", "")), "limit": args.get("limit"),
+                     "fetched": 0, "goal": None, "message": "Запуск", "started": now, "updated": now,
+                     "changed": now}
+        if self.path:
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError:
+                self.path = None
+        self._write()
+
+    def update(self, done: float, total: float | None, message: str) -> None:
+        now = int(time.time() * 1000)
+        if done != self.data["fetched"] or message != self.data["message"]:  # что-то сдвинулось
+            self.data["changed"] = now
+        self.data.update(fetched=done, goal=total, message=message, updated=now)
+        self._write()
+
+    def _write(self) -> None:
+        if not self.path:
+            return
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def remove(self) -> None:
+        if self.path:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+
 class Server:
     def __init__(self, api: Api | None, send: Callable[[dict], None],
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, progress_dir: str | None = None):
         self.api, self.send, self.sleep = api, send, sleep
+        self.progress_dir = progress_dir  # None — прогресс в файлы не пишется
+        self._calls = 0
         self.avtoelon_get = avtoelon.http_get  # в тестах подменяется
 
     # ---------- инструменты ----------
@@ -524,8 +576,11 @@ class Server:
         if fn is None:
             return {"content": [{"type": "text", "text": f"Нет инструмента {name}"}], "isError": True}
         token = (params.get("_meta") or {}).get("progressToken")
+        track = ProgressFile(self.progress_dir, name, args, self._next_call()) if name in SEARCH_TOOLS else None
 
         def progress(done: float, total: float | None, message: str) -> None:
+            if track:
+                track.update(done, total, message)
             if token is not None:
                 p = {"progressToken": token, "progress": done, "message": message}
                 if total:
@@ -538,8 +593,15 @@ class Server:
             return {"content": [{"type": "text", "text": str(e)}], "isError": True}
         except (KeyError, ValueError, TypeError) as e:
             return {"content": [{"type": "text", "text": f"Неверные аргументы: {e}"}], "isError": True}
+        finally:
+            if track:
+                track.remove()
         # без отступов: на 50 объявлениях это ~10% контекста
         return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, separators=(",", ":"))}]}
+
+    def _next_call(self) -> int:
+        self._calls += 1
+        return self._calls
 
     @staticmethod
     def _ok(mid, result) -> dict:
@@ -559,7 +621,8 @@ def main() -> None:
         out.write(json.dumps(msg, ensure_ascii=False) + "\n")
         out.flush()
 
-    server = Server(api, send)
+    pdir = os.environ.get("UZPARSER_PROGRESS_DIR")
+    server = Server(api, send, progress_dir=DEFAULT_PROGRESS_DIR if pdir is None else (pdir.strip() or None))
     for line in sys.stdin:
         line = line.strip()
         if not line:
