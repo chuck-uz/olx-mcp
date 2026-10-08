@@ -33,13 +33,13 @@ class AvtoelonError(Exception):
     pass
 
 
-def data_dir() -> Path:
+def data_dir(sub: str = "avtoelon") -> Path:
     base = os.environ.get("UZPARSER_DATA") or os.environ.get("OLX_MCP_DATA")
     if not base:
         base, old = Path.home() / ".uzparser", Path.home() / ".olx-mcp"
         if old.exists() and not base.exists():  # проект переименован: переносим старые выгрузки
             old.rename(base)
-    d = Path(base) / "avtoelon"
+    d = Path(base) / sub
     d.mkdir(parents=True, exist_ok=True)
     return d
 

@@ -1,4 +1,4 @@
-"""uzParser — MCP-сервер для Claude: поиск по OLX.uz, Uzum Market и avtoelon.uz.
+"""uzParser — MCP-сервер для Claude: поиск по OLX.uz, Uzum Market, Яндекс Маркету (market.yandex.uz) и avtoelon.uz.
 
 OLX и Uzum собирает сервер парсеров (там headless Chromium): MCP ставит задание в его API, ждёт и отдаёт
 Claude сводку и компактный список объявлений. Полная выгрузка остаётся на сервере, её можно
@@ -24,7 +24,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 DEFAULT_URL = "https://tools.oresh.in"  # сервер парсеров OLX/Uzum
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -33,7 +33,7 @@ TEXT_CUT = 200     # символов описания в компактном �
 MULTI_CUT = 1500   # у объявлений с несколькими позициями описание нужно целиком — там цены
 MULTI_NOTE = "несколько позиций или конфигураций с разными ценами — разбери по описанию; цена объявления — только одна из них"
 JOB_TIMEOUT = 1800  # 1000 объявлений ≈ 40 с, 10 000 ≈ 7 минут, плюс очередь
-SEARCH_TOOLS = ("olx_search", "uzum_search", "avtoelon_search")
+SEARCH_TOOLS = ("olx_search", "uzum_search", "avtoelon_search", "yandex_search")
 DEFAULT_PROGRESS_DIR = os.path.join(os.path.expanduser("~"), ".cache", "uzparser", "progress")
 
 SORTS = {
@@ -45,9 +45,10 @@ SORTS = {
 UZUM_SORTS = ["popular", "cheap", "expensive", "rating", "new"]
 
 try:  # запуск как пакета (uzparser.server) и как файла (python server.py)
-    from uzparser import avtoelon
+    from uzparser import avtoelon, yandex
 except ImportError:  # pragma: no cover
     import avtoelon
+    import yandex
 
 INSTRUCTIONS = (
     "Для любых запросов про объявления на OLX.uz (olx.uz) — найти, подобрать, сравнить цены, оценить рынок, "
@@ -57,7 +58,10 @@ INSTRUCTIONS = (
     "скидкой, рассрочкой и рейтингом. Если просят сравнить рынок, можно собрать с обеих площадок. "
     "Если пользователь прислал ссылку на список с фильтрами — передай её как есть. "
     "Для машин (купить авто, цены на Cobalt, Gentra и т.п.) используй avtoelon_* — крупнейшую площадку "
-    "авто-объявлений Узбекистана; машины на OLX тоже есть (olx_search), для полной картины можно собрать с обеих."
+    "авто-объявлений Узбекистана; машины на OLX тоже есть (olx_search), для полной картины можно собрать с обеих. "
+    "Для Яндекс Маркета (market.yandex.uz, «Market Yandex Go») — yandex_*. Там почти всё везут продавцы из России "
+    "(cross_border: доставка из-за рубежа, 1–3 недели, цены часто заметно выше, чем на Uzum и OLX); товары со складов "
+    "в Узбекистане приезжают за 1–3 дня. Всегда разделяй эти группы и называй срок доставки, когда советуешь."
 )
 
 TOOLS = [
@@ -189,6 +193,48 @@ TOOLS = [
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
     },
     {
+        "name": "yandex_search",
+        "description": (
+            "Ищет товары на Яндекс Маркете для Узбекистана (market.yandex.uz): цена в сумах, старая цена и скидка, "
+            "рейтинг, отзывы, сколько купили, остаток, характеристики и — главное — откуда доставка: cross_border=true "
+            "значит «из-за рубежа» (продавец из России, срок 1–3 недели, возможна пошлина), иначе товар со склада "
+            "в Узбекистане. delivery_days — через сколько дней ближайшая доставка. Сводка делит цены на local и "
+            "cross_border. query — поисковый запрос или ссылка market.yandex.uz. Работает с компьютера пользователя "
+            "(узбекский IP), ~2–3 с на 16 товаров; до 1000. В ответе первые 50; остальные — yandex_get_items."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Поисковый запрос или ссылка https://market.yandex.uz/…"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": yandex.MAX_ITEMS, "default": 100},
+                "price_from": {"type": "number", "description": "Цена от, в сумах"},
+                "price_to": {"type": "number", "description": "Цена до, в сумах"},
+                "sort": {"type": "string", "enum": list(yandex.SORTS),
+                         "description": "popular — популярные, cheap / expensive — по цене, rating — по рейтингу. "
+                                        "По умолчанию — как на сайте"},
+                "local_only": {"type": "boolean", "default": False,
+                               "description": "Оставить в ответе только товары не из-за рубежа"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "yandex_get_items",
+        "description": "Дочитывает товары из сохранённой выгрузки Яндекс Маркета (dump_id) порциями по 50; "
+                       "full=true — со всеми характеристиками; local_only=true — только не из-за рубежа.",
+        "inputSchema": {"type": "object", "properties": {
+            "dump_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "count": {"type": "integer", "minimum": 1, "maximum": 100, "default": PAGE},
+            "full": {"type": "boolean", "default": False},
+            "local_only": {"type": "boolean", "default": False}}, "required": ["dump_id"]},
+    },
+    {
+        "name": "yandex_list_dumps",
+        "description": "Прошлые выгрузки Яндекс Маркета (хранятся на этом компьютере в ~/.uzparser/yandex).",
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
+    },
+    {
         "name": "olx_list_dumps",
         "description": "Список прошлых выгрузок OLX на сервере: запрос, дата, число объявлений, медиана цены.",
         "inputSchema": {"type": "object", "properties": {
@@ -225,7 +271,7 @@ class Api:
                 raise ToolError("Сервер не принял токен: проверьте UZPARSER_TOKEN или попросите новый") from None
             if e.code == 429:  # OLX забанил адрес сервера: повторы только продлевают бан
                 raise ToolError(f"{detail or 'OLX временно ограничил запросы'}. Не повторяй поиск OLX до этого "
-                                "времени; Uzum и avtoelon работают как обычно") from None
+                                "времени; Uzum, Яндекс Маркет и avtoelon работают как обычно") from None
             raise ToolError(f"Сервер парсеров ответил {e.code}: {detail or e.reason}") from None
         except urllib.error.URLError as e:
             raise ToolError(f"Сервер парсеров недоступен: {e.reason}") from None
@@ -325,6 +371,34 @@ def compact_car(i: dict, full: bool = False) -> dict:
     return {k: v for k, v in item.items() if v not in (None, "", [])}
 
 
+def compact_ym(i: dict, full: bool = False) -> dict:
+    """Товар Яндекс Маркета для ответа Claude."""
+    specs = i.get("specs") or {}
+    days = i.get("delivery_days")
+    item = {
+        "id": i["id"], "title": i["title"],
+        "price": (fmt_num(i["price"]) + " сум") if i.get("price") else "—", "price_uzs": i.get("price"),
+        "was": (fmt_num(i["price_full"]) + " сум") if i.get("price_full") else None,
+        "discount": f"{i['discount']}%" if i.get("discount") else None,
+        "cross_border": True if i.get("cross_border") else None,
+        "origin": i.get("origin"),
+        "delivery": (f"через {days} дн. ({i['delivery']})" if days is not None else i.get("delivery")),
+        "express": True if i.get("express") else None,
+        "rating": f"{i['rating']} ({i.get('reviews') or 0} оценок)" if i.get("rating") else None,
+        "bought": i.get("bought"), "stock_left": i.get("stock_left"),
+        "specs": specs if full else ("; ".join(f"{k}: {v}" for k, v in list(specs.items())[:6]) or None),
+        "sponsored": True if i.get("sponsored") else None,
+        "url": i["url"],
+    }
+    return {k: v for k, v in item.items() if v not in (None, "", [], {})}
+
+
+def ym_group(g: dict) -> dict:
+    pu = g.get("price_uzs")
+    return {"items": g["items"], "price_uzs": {k: fmt_num(v) for k, v in pu.items()} if pu else None,
+            "delivery_days_median": g.get("delivery_days_median")}
+
+
 def uzum_summary(rep: dict, dump_id: str) -> dict:
     s = rep["stats"]
     pu = s.get("price_uzs")
@@ -408,6 +482,7 @@ class Server:
         self.progress_dir = progress_dir  # None — прогресс в файлы не пишется
         self._calls = 0
         self.avtoelon_get = avtoelon.http_get  # в тестах подменяется
+        self.yandex_get = None                 # None — urllib с куками (yandex.Http); в тестах подменяется
 
     # ---------- инструменты ----------
 
@@ -543,6 +618,47 @@ class Server:
 
     def avtoelon_list_dumps(self, args: dict, progress) -> list:
         return avtoelon.list_dumps(max(1, min(int(args.get("limit") or 20), 100)))
+
+    def yandex_search(self, args: dict, progress) -> dict:
+        try:
+            url = yandex.build_url(args["query"], args.get("price_from"), args.get("price_to"), args.get("sort"))
+            limit = max(1, min(int(args.get("limit") or 100), yandex.MAX_ITEMS))
+            items, total = yandex.fetch(url, limit, sleep=self.sleep, get=self.yandex_get,
+                                        progress=lambda n, t: progress(n, min(limit, t or limit),
+                                                                       f"Собрано {n} из {min(limit, t or limit)}"))
+        except yandex.YandexError as e:
+            raise ToolError(str(e)) from None
+        rep = yandex.build_report(items, url, total)
+        dump_id = yandex.save(rep)
+        s = rep["stats"]
+        rows = [i for i in items if not i["cross_border"]] if args.get("local_only") else items
+        out = {"dump_id": dump_id, "source_url": url, "items": s["items"], "total_on_site": total,
+               "price_uzs": {k: fmt_num(v) for k, v in s["price_uzs"].items()} if s.get("price_uzs") else None,
+               "local": ym_group(s["local"]), "cross_border": ym_group(s["cross_border"]),
+               "with_discount": s["with_discount"],
+               "shown": f"0–{min(PAGE, len(rows))} из {len(rows)}" + (" (только не из-за рубежа)" if args.get("local_only") else "")}
+        if len(rows) > PAGE:
+            out["more"] = f"yandex_get_items(dump_id='{dump_id}', offset={PAGE}" + (", local_only=true)" if args.get("local_only") else ")")
+        out["items_list"] = [compact_ym(i) for i in rows[:PAGE]]
+        return out
+
+    def yandex_get_items(self, args: dict, progress) -> dict:
+        try:
+            rep = yandex.load(str(args["dump_id"]))
+        except yandex.YandexError as e:
+            raise ToolError(str(e)) from None
+        rows = [i for i in rep["items"] if not i["cross_border"]] if args.get("local_only") else rep["items"]
+        off = max(0, int(args.get("offset") or 0))
+        cnt = max(1, min(int(args.get("count") or PAGE), 100))
+        part = rows[off:off + cnt]
+        out = {"dump_id": args["dump_id"], "total": len(rows), "shown": f"{off}–{off + len(part)}",
+               "items_list": [compact_ym(i, full=bool(args.get("full"))) for i in part]}
+        if off + cnt < len(rows):
+            out["more"] = f"yandex_get_items(dump_id='{args['dump_id']}', offset={off + cnt})"
+        return out
+
+    def yandex_list_dumps(self, args: dict, progress) -> list:
+        return yandex.list_dumps(max(1, min(int(args.get("limit") or 20), 100)))
 
     def olx_list_dumps(self, args: dict, progress) -> list:
         api = self._need_api()
