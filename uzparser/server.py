@@ -24,7 +24,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 DEFAULT_URL = "https://tools.oresh.in"  # сервер парсеров OLX/Uzum
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -223,6 +223,9 @@ class Api:
                 detail = None
             if e.code == 401:
                 raise ToolError("Сервер не принял токен: проверьте UZPARSER_TOKEN или попросите новый") from None
+            if e.code == 429:  # OLX забанил адрес сервера: повторы только продлевают бан
+                raise ToolError(f"{detail or 'OLX временно ограничил запросы'}. Не повторяй поиск OLX до этого "
+                                "времени; Uzum и avtoelon работают как обычно") from None
             raise ToolError(f"Сервер парсеров ответил {e.code}: {detail or e.reason}") from None
         except urllib.error.URLError as e:
             raise ToolError(f"Сервер парсеров недоступен: {e.reason}") from None
@@ -429,7 +432,10 @@ class Server:
                      "В очереди" if job["status"] == "queued" else f"Собрано {job.get('fetched', 0)} из {goal}")
         if job["status"] == "error":
             raise ToolError(f"Парсер {label}: {job.get('error')}")
-        return job["dump_id"], api.call("GET", f"/api/{kind}/dumps/{job['dump_id']}")
+        rep = api.call("GET", f"/api/{kind}/dumps/{job['dump_id']}")
+        if job.get("cached"):  # сервер отдал выгрузку того же поиска за последний час
+            rep["cached"] = True
+        return job["dump_id"], rep
 
     def olx_search(self, args: dict, progress: Callable[[float, float | None, str], None]) -> dict:
         query = build_query(args["query"], args.get("price_from"), args.get("price_to"), args.get("sort"))
@@ -437,6 +443,8 @@ class Server:
         dump_id, rep = self._run("olx", "OLX", {"url": query, "limit": limit, "photos": bool(args.get("photos"))},
                                  limit, progress)
         out = summary(rep, dump_id)
+        if rep.get("cached"):
+            out["cached"] = f"тот же поиск уже собирали в {rep['fetched_at'][11:16]} UTC — отдана эта выгрузка"
         out["shown"] = f"0–{min(PAGE, len(rep['offers']))} из {len(rep['offers'])}"
         if len(rep["offers"]) > PAGE:
             out["more"] = f"olx_get_offers(dump_id='{dump_id}', offset={PAGE})"

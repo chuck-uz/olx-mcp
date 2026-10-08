@@ -54,8 +54,8 @@ class FakeHttp:
             return [{"id": "uzum_q_mini_pc-20261005-100000-abcdef", **{k: v for k, v in UZUM_REPORT.items() if k != "items"}}]
         return UZUM_REPORT
 
-    def __init__(self, fail=None):
-        self.calls, self.polls, self.fail = [], 0, fail
+    def __init__(self, fail=None, cached=False):
+        self.calls, self.polls, self.fail, self.cached = [], 0, fail, cached
 
     def __call__(self, req, timeout):
         body = json.loads(req.data) if req.data else None
@@ -66,7 +66,8 @@ class FakeHttp:
         if path.startswith("/api/uzum/"):
             return FakeResp(json.dumps(self.uzum(path)).encode())
         if path == "/api/olx/jobs":
-            data = {"id": "j1", "status": "queued", "fetched": 0}
+            data = ({"id": "j1", "status": "done", "fetched": 120, "dump_id": "olx_q_iphone-20261004-100000-abcdef",
+                     "cached": True} if self.cached else {"id": "j1", "status": "queued", "fetched": 0})
         elif path == "/api/olx/jobs/j1":
             self.polls += 1
             data = ({"id": "j1", "status": "running", "fetched": 50, "total": 1000} if self.polls == 1
@@ -176,6 +177,19 @@ class ToolsTest(unittest.TestCase):
         self.assertIn("Неверные аргументы", msg)
         res, msg = call(srv, "nope", {})
         self.assertTrue(res["isError"])
+        srv, _ = make(FakeHttp(fail=429))  # OLX забанил сервер: просим не долбить повторами
+        res, msg = call(srv, "olx_search", {"query": "x"})
+        self.assertTrue(res["isError"])
+        self.assertTrue(msg.startswith("boom.") and "Не повторяй поиск OLX" in msg)
+
+    def test_cached_search_is_marked(self):
+        http = FakeHttp(cached=True)
+        srv, _ = make(http)
+        _, out = call(srv, "olx_search", {"query": "iphone"})
+        self.assertIn("10:00 UTC", out["cached"])
+        self.assertEqual(http.polls, 0)  # готовое задание — без опроса
+        _, plain = call(make()[0], "olx_search", {"query": "iphone"})
+        self.assertNotIn("cached", plain)
 
 
 class UzumToolsTest(unittest.TestCase):
