@@ -1,7 +1,7 @@
 # uzParser
 
 MCP-сервер, который даёт Claude инструменты поиска по OLX.uz, Uzum Market, Яндекс Маркету (market.yandex.uz), avtoelon.uz
-и пяти магазинам техники (idea, alifshop, texnomart, mediapark, olcha). На просьбу «найди на OLX…»,
+и шести магазинам техники (idea, alifshop, texnomart, mediapark, olcha, asaxiy). На просьбу «найди на OLX…»,
 «найди на Uzum…» или «найди на avtoelon…» Claude не ходит на сайт сам (сайты режут такие запросы), а вызывает парсеры
 и получает структурированные данные: цены в сумах и у.е., скидки, рейтинг, состояние, пробег, продавца.
 
@@ -30,7 +30,7 @@ Claude ──stdio──▶ uzParser (этот репозиторий, у вас
 | `yandex_search(query, limit, price_from, price_to, sort, local_only)` | Товары Яндекс Маркета для Узбекистана: цена в сумах, старая цена и скидка, рейтинг, сколько купили, остаток, характеристики, **откуда доставка** (`cross_border` — из-за рубежа) и через сколько дней. Сводка делит цены на `local` и `cross_border`. `sort`: `popular`, `cheap`, `expensive`, `rating`. До 1000 |
 | `yandex_get_items(dump_id, offset, count, full, local_only)` | Дочитывает выгрузку Яндекс Маркета; `local_only` — только не из-за рубежа |
 | `yandex_list_dumps(limit)` | Прошлые выгрузки Яндекс Маркета |
-| `shops_search(query, shops, limit, price_from, price_to, strict, max_pages)` | Новая техника сразу в idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz: цена, старая цена, скидка, рассрочка, наличие, продавец, гарантия, ссылка. Одна таблица от дешёвых к дорогим, сначала то, что в наличии. `limit` — совпадений с магазина (до 200) |
+| `shops_search(query, shops, limit, price_from, price_to, strict, max_pages)` | Новая техника сразу в idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz, asaxiy.uz: цена, старая цена, скидка, рассрочка, наличие, продавец, гарантия, ссылка. Одна таблица от дешёвых к дорогим, сначала то, что в наличии. `limit` — совпадений с магазина (до 200) |
 | `shops_get_items(dump_id, offset, count, shop, full)` | Дочитывает выгрузку магазинов; `shop` — один магазин |
 | `shops_list_dumps(limit)` | Прошлые поиски по магазинам |
 
@@ -73,7 +73,9 @@ market.yandex.uz узбекскому IP отдаёт обычный HTML, а с
 
 ### Магазины техники — открытые API, тоже с вашего компьютера
 
-idea.uz, alifshop.uz, texnomart.uz, mediapark.uz и olcha.uz отдают каталог тем же JSON API, что их сайты и приложения:
+idea.uz, alifshop.uz, texnomart.uz, mediapark.uz и olcha.uz отдают каталог тем же JSON API, что их сайты и приложения;
+asaxiy.uz — только HTML-страницы поиска (по 24 товара, ~5 с на страницу) и только узбекскому IP, серверу за границей
+он показывает проверку Cloudflare:
 браузер, сервер и токен не нужны, магазины опрашиваются параллельно (~5–10 с). Всё — со складов в Узбекистане,
 с официальной гарантией и рассрочкой. Выгрузки — в `~/.uzparser/shops/`.
 

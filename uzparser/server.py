@@ -25,7 +25,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 DEFAULT_URL = "https://tools.oresh.in"  # сервер парсеров OLX/Uzum
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -64,8 +64,8 @@ INSTRUCTIONS = (
     "Для Яндекс Маркета (market.yandex.uz, «Market Yandex Go») — yandex_*. Там почти всё везут продавцы из России "
     "(cross_border: доставка из-за рубежа, 1–3 недели, цены часто заметно выше, чем на Uzum и OLX); товары со складов "
     "в Узбекистане приезжают за 1–3 дня. Всегда разделяй эти группы и называй срок доставки, когда советуешь. "
-    "Для новой техники с официальной гарантией и рассрочкой — shops_search: сразу пять магазинов Узбекистана "
-    "(idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz). Когда просят «где купить», «сравни цены», "
+    "Для новой техники с официальной гарантией и рассрочкой — shops_search: сразу шесть магазинов Узбекистана "
+    "(idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz, asaxiy.uz). Когда просят «где купить», «сравни цены», "
     "«найди дешевле» на технику — собирай и магазины, и Uzum, и OLX (б/у), и Яндекс Маркет (с пометкой о доставке)."
 )
 
@@ -242,8 +242,8 @@ TOOLS = [
     {
         "name": "shops_search",
         "description": (
-            "Ищет новую технику сразу в пяти магазинах Узбекистана — idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, "
-            "olcha.uz — и возвращает общую таблицу от дешёвых к дорогим (сначала то, что в наличии): цена, старая цена, "
+            "Ищет новую технику сразу в шести магазинах Узбекистана — idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, "
+            "olcha.uz, asaxiy.uz — и возвращает общую таблицу от дешёвых к дорогим (сначала то, что в наличии): цена, старая цена, "
             "скидка, рассрочка, наличие, продавец (alifshop), гарантия, рейтинг, ссылка. Всё со складов в Узбекистане. "
             "Поиск магазинов нечёткий, поэтому по умолчанию (strict) остаются только товары, в названии которых есть "
             "все слова запроса: пиши так, как товар называется в каталоге — бренд и модель («mac mini m4», «iphone 15», "
@@ -256,7 +256,7 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string", "description": "Бренд и модель или название товара"},
                 "shops": {"type": "array", "items": {"type": "string", "enum": list(shops.SHOPS)},
-                          "description": "Какие магазины опросить; по умолчанию все пять"},
+                          "description": "Какие магазины опросить; по умолчанию все шесть"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": shops.PER_SHOP_MAX, "default": 30,
                           "description": "Сколько совпавших товаров брать с каждого магазина"},
                 "price_from": {"type": "number", "description": "Цена от, в сумах"},

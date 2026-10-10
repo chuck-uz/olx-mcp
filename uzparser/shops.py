@@ -1,6 +1,7 @@
-"""Магазины техники Узбекистана одним поиском: idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz.
+"""Магазины техники Узбекистана одним поиском: idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz, asaxiy.uz.
 
-У всех пятерых открытый JSON API (тот же, что у их сайтов и приложений), браузер и сервер парсеров не нужны —
+У первых пяти открытый JSON API (тот же, что у их сайтов и приложений); asaxiy отдаёт только HTML-страницы
+поиска, и то лишь узбекским IP (серверу за границей — проверка Cloudflare). Браузер и сервер парсеров не нужны —
 запросы идут с машины пользователя через urllib, параллельно по магазинам.
 
 Поиск в этих API нечёткий: на «mac mini» idea отдаёт зарядки «Mini», texnomart — «Яндекс Станцию Мини»,
@@ -11,6 +12,7 @@ alifshop ставит Mac mini на вторую страницу после Mac
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 import secrets
@@ -22,7 +24,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Iterator
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 try:
     from uzparser.avtoelon import data_dir as _data_dir
@@ -32,11 +34,11 @@ except ImportError:  # запуск server.py напрямую
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 MAX_PAGES = 5        # страниц на магазин по умолчанию: релевантное у них часто не на первой
 PER_SHOP_MAX = 200   # совпавших товаров с одного магазина
-SHOPS = ("idea", "alifshop", "texnomart", "mediapark", "olcha")
+SHOPS = ("idea", "alifshop", "texnomart", "mediapark", "olcha", "asaxiy")
 NAMES = {"idea": "idea.uz", "alifshop": "alifshop.uz", "texnomart": "texnomart.uz",
-         "mediapark": "mediapark.uz", "olcha": "olcha.uz"}
+         "mediapark": "mediapark.uz", "olcha": "olcha.uz", "asaxiy": "asaxiy.uz"}
 
-Getter = Callable[[str, "dict | None"], dict]  # (url, json-тело для POST или None) → ответ
+Getter = Callable[..., "dict | str"]  # (url, json-тело для POST или None, raw=False) → JSON или текст (raw=True)
 
 
 class ShopsError(Exception):
@@ -47,8 +49,8 @@ def data_dir():
     return _data_dir("shops")
 
 
-def http_json(url: str, body: dict | None = None, timeout: int = 25) -> dict:
-    headers = {"User-Agent": UA, "Accept": "application/json", "Accept-Language": "ru"}
+def http_json(url: str, body: dict | None = None, timeout: int = 25, raw: bool = False) -> dict | str:
+    headers = {"User-Agent": UA, "Accept": "text/html" if raw else "application/json", "Accept-Language": "ru"}
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -56,8 +58,11 @@ def http_json(url: str, body: dict | None = None, timeout: int = 25) -> dict:
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if body is not None else "GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8", "replace"))
+            text = r.read().decode("utf-8", "replace")
+            return text if raw else json.loads(text)
     except urllib.error.HTTPError as e:
+        if e.code == 403 and b"Just a moment" in (e.read() or b"")[:20000]:
+            raise ShopsError("закрыт проверкой Cloudflare: работает только с узбекского IP, без VPN") from None
         raise ShopsError(f"ответил {e.code}") from None
     except urllib.error.URLError as e:
         raise ShopsError(f"недоступен: {e.reason}") from None
@@ -193,8 +198,61 @@ def pages_olcha(q: str, get: Getter, max_pages: int) -> Iterator[tuple[list[dict
             return
 
 
+ASAXIY_PAGE = 24
+_AX_CARD = re.compile(r'<div class="product__item d-flex')
+
+
+def _ax_text(seg: str, cls: str) -> str | None:
+    m = re.search(r'class="[^"]*\b' + re.escape(cls) + r'\b[^"]*"[^>]*>(.*?)</', seg, re.S)
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", m.group(1)))).strip() if m else None
+
+
+def parse_asaxiy(page: str) -> tuple[list[dict], int | None]:
+    """Карточки результатов поиска asaxiy.uz (HTML) и общее число найденного (totalCount)."""
+    start = page.find("loading-more-product-list")
+    body = page[start:] if start >= 0 else page
+    starts = [m.start() for m in _AX_CARD.finditer(body)] + [len(body)]
+    rows = []
+    for a, b in zip(starts, starts[1:]):
+        seg = body[a:b]
+        pid = re.search(r'data-product-id="(\d+)"', seg)
+        href = re.search(r'<a href="(/ru/product/[^"]+)"', seg)
+        title = _ax_text(seg, "product__item__info-title")
+        if not (pid and title):
+            continue
+        inst = _ax_text(seg, "installment__price")
+        reviews = re.search(r"(\d+)\s+отзыв", seg)
+        stars = len(re.findall(r'class="fas fa-star"', seg)) + 0.5 * len(re.findall(r"fa-star-half", seg))
+        out = "Нет в наличии" in seg or "Предзаказ" in seg
+        rows.append(_item("asaxiy", id=pid.group(1), title=title,
+                          price=_int(re.sub(r"\D", "", _ax_text(seg, "product__item-price") or "")),
+                          price_old=_int(re.sub(r"\D", "", _ax_text(seg, "product__item-old--price") or "")),
+                          in_stock=not out, installment=("от " + inst.replace(" x ", " × ")) if inst else None,
+                          # без отзывов сайт рисует пять звёзд-заглушек — такой рейтинг не считаем
+                          rating=stars if reviews and _int(reviews.group(1)) and stars else None,
+                          reviews=_int(reviews.group(1)) if reviews else None,
+                          specs={"Статус": "предзаказ"} if "Предзаказ" in seg else None,
+                          url="https://asaxiy.uz" + href.group(1) if href else None))
+    total = re.search(r'"totalCount":(\d+)', page)
+    return rows, int(total.group(1)) if total else None
+
+
+def pages_asaxiy(q: str, get: Getter, max_pages: int) -> Iterator[tuple[list[dict], int | None]]:
+    """totalCount у asaxiy ненадёжен (на «iphone 15» — 6 при 24 карточках), поэтому конец выдачи узнаём иначе:
+    за последней страницей сайт перенаправляет на первую, и новых товаров на ней нет."""
+    seen: set[str] = set()
+    for page in range(1, max_pages + 1):
+        path = "/ru/product" if page == 1 else f"/ru/product/page={page}"
+        rows, total = parse_asaxiy(get(f"https://asaxiy.uz{path}?key={quote_plus(q)}", None, raw=True))
+        new = [r for r in rows if r["id"] not in seen]
+        seen.update(r["id"] for r in rows)
+        yield new, total
+        if len(new) < ASAXIY_PAGE:
+            return
+
+
 PAGERS = {"idea": pages_idea, "alifshop": pages_alifshop, "texnomart": pages_texnomart,
-          "mediapark": pages_mediapark, "olcha": pages_olcha}
+          "mediapark": pages_mediapark, "olcha": pages_olcha, "asaxiy": pages_asaxiy}
 
 
 # ---------- релевантность ----------
