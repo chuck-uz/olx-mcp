@@ -109,7 +109,8 @@ class ProtocolTest(unittest.TestCase):
         names = [t["name"] for t in srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
         self.assertEqual(names, ["olx_search", "olx_get_offers", "uzum_search", "uzum_get_items", "uzum_list_dumps",
                                  "avtoelon_search", "avtoelon_get_items", "avtoelon_list_dumps", "yandex_search", "yandex_get_items",
-                                 "yandex_list_dumps", "shops_search", "shops_get_items", "shops_list_dumps",
+                                 "yandex_list_dumps", "shops_search", "shops_get_items", "shops_list_dumps", "uybor_search",
+                                 "uybor_get_items", "uybor_list_dumps",
                                  "olx_list_dumps"])
         self.assertEqual(srv.handle({"jsonrpc": "2.0", "id": 3, "method": "nope"})["error"]["code"], -32601)
 

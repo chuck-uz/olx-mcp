@@ -1,5 +1,5 @@
 """uzParser — MCP-сервер для Claude: поиск по OLX.uz, Uzum Market, Яндекс Маркету (market.yandex.uz), avtoelon.uz
-и магазинам техники (idea, alifshop, texnomart, mediapark, olcha).
+и магазинам техники (idea, alifshop, texnomart, mediapark, olcha, asaxiy), недвижимость — uybor.uz.
 
 OLX и Uzum собирает сервер парсеров (там headless Chromium): MCP ставит задание в его API, ждёт и отдаёт
 Claude сводку и компактный список объявлений. Полная выгрузка остаётся на сервере, её можно
@@ -25,7 +25,7 @@ import urllib.request
 from typing import Any, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 DEFAULT_URL = "https://tools.oresh.in"  # сервер парсеров OLX/Uzum
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -34,7 +34,7 @@ TEXT_CUT = 200     # символов описания в компактном �
 MULTI_CUT = 1500   # у объявлений с несколькими позициями описание нужно целиком — там цены
 MULTI_NOTE = "несколько позиций или конфигураций с разными ценами — разбери по описанию; цена объявления — только одна из них"
 JOB_TIMEOUT = 1800  # 1000 объявлений ≈ 40 с, 10 000 ≈ 7 минут, плюс очередь
-SEARCH_TOOLS = ("olx_search", "uzum_search", "avtoelon_search", "yandex_search", "shops_search")
+SEARCH_TOOLS = ("olx_search", "uzum_search", "avtoelon_search", "yandex_search", "shops_search", "uybor_search")
 DEFAULT_PROGRESS_DIR = os.path.join(os.path.expanduser("~"), ".cache", "uzparser", "progress")
 
 SORTS = {
@@ -46,10 +46,11 @@ SORTS = {
 UZUM_SORTS = ["popular", "cheap", "expensive", "rating", "new"]
 
 try:  # запуск как пакета (uzparser.server) и как файла (python server.py)
-    from uzparser import avtoelon, shops, yandex
+    from uzparser import avtoelon, shops, uybor, yandex
 except ImportError:  # pragma: no cover
     import avtoelon
     import shops
+    import uybor
     import yandex
 
 INSTRUCTIONS = (
@@ -66,7 +67,9 @@ INSTRUCTIONS = (
     "в Узбекистане приезжают за 1–3 дня. Всегда разделяй эти группы и называй срок доставки, когда советуешь. "
     "Для новой техники с официальной гарантией и рассрочкой — shops_search: сразу шесть магазинов Узбекистана "
     "(idea.uz, alifshop.uz, texnomart.uz, mediapark.uz, olcha.uz, asaxiy.uz). Когда просят «где купить», «сравни цены», "
-    "«найди дешевле» на технику — собирай и магазины, и Uzum, и OLX (б/у), и Яндекс Маркет (с пометкой о доставке)."
+    "«найди дешевле» на технику — собирай и магазины, и Uzum, и OLX (б/у), и Яндекс Маркет (с пометкой о доставке). "
+    "Недвижимость (квартиры, дома, участки, коммерция; продажа и аренда) — uybor_search по uybor.uz, почти всё в Ташкенте; "
+    "квартиры и дома есть и на OLX, для полной картины можно собрать с обеих."
 )
 
 TOOLS = [
@@ -286,6 +289,58 @@ TOOLS = [
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
     },
     {
+        "name": "uybor_search",
+        "description": (
+            "Ищет недвижимость на uybor.uz (Узбекистан, почти всё — Ташкент): квартиры, дома, участки, коммерцию, "
+            "продажа или аренда. Цена (в у.е. и сумах), $/м² для продажи, комнаты, площадь, сотки участка, этаж/этажность, "
+            "новостройка, ремонт, материал стен, район, махалля, улица, метро, торг, просмотры, дата. Сводка: медиана "
+            "цены и $/м², разбивка по комнатам и районам. district — район или место текстом («Юнусабадский», «Чиланзар», "
+            "«Ц-1», «Минор»): фильтруется по названиям, поэтому поиск по району просматривает до 4000 объявлений. "
+            "Цены — как указал продавец; у объявлений с price_per цена за сотку или м², а не за объект. Встречаются "
+            "явные ошибки цены — смотри на медиану. Работает с компьютера пользователя, токен не нужен. "
+            "В ответе первые 50; остальные — uybor_get_items."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": ["sale", "rent"], "default": "sale",
+                              "description": "sale — продажа, rent — аренда"},
+                "category": {"type": "string", "enum": list(uybor.CATEGORIES), "default": "apartment",
+                             "description": "apartment — квартира, house — дом (все), private_house — частный дом, "
+                                            "cottage, dacha, commercial — для бизнеса, office, warehouse, land — участок, room — комната"},
+                "rooms": {"type": "string", "description": "Комнаты через запятую: «2», «2,3», «studio», «6+»"},
+                "district": {"type": "string", "description": "Район / массив / улица / метро текстом"},
+                "region": {"type": "string", "description": "Регион: «Ташкент», «Ташкентская область», «Самаркандская область»…"},
+                "price_from": {"type": "number"}, "price_to": {"type": "number"},
+                "currency": {"type": "string", "enum": ["usd", "uzs"], "default": "usd",
+                             "description": "Валюта для price_from/price_to; объявления в другой валюте в фильтр не попадут"},
+                "square_from": {"type": "number", "description": "Площадь от, м²"},
+                "square_to": {"type": "number", "description": "Площадь до, м²"},
+                "new_building": {"type": "boolean", "description": "true — новостройки, false — вторичка"},
+                "repair": {"type": "string", "enum": list(uybor.REPAIRS),
+                           "description": "evro — евроремонт, sredniy — средний, custom — дизайнерский, "
+                                          "kapital — требует ремонта, chernovaya — черновая"},
+                "sort": {"type": "string", "enum": list(uybor.SORTS),
+                         "description": "new — новые (по умолчанию), cheap / expensive — по цене, popular — по просмотрам"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": uybor.MAX_ITEMS, "default": 100},
+            },
+        },
+    },
+    {
+        "name": "uybor_get_items",
+        "description": "Дочитывает объявления из выгрузки uybor (dump_id) порциями по 50; full=true — с полным описанием и координатами.",
+        "inputSchema": {"type": "object", "properties": {
+            "dump_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "count": {"type": "integer", "minimum": 1, "maximum": 100, "default": PAGE},
+            "full": {"type": "boolean", "default": False}}, "required": ["dump_id"]},
+    },
+    {
+        "name": "uybor_list_dumps",
+        "description": "Прошлые выгрузки uybor (хранятся на этом компьютере в ~/.uzparser/uybor).",
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}},
+    },
+    {
         "name": "olx_list_dumps",
         "description": "Список прошлых выгрузок OLX на сервере: запрос, дата, число объявлений, медиана цены.",
         "inputSchema": {"type": "object", "properties": {
@@ -461,6 +516,34 @@ def compact_shop(i: dict, full: bool = False) -> dict:
     return {k: v for k, v in item.items() if v not in (None, "", [], {})}
 
 
+def compact_flat(i: dict, full: bool = False) -> dict:
+    """Объявление uybor для ответа Claude."""
+    price = None
+    if i.get("price"):
+        price = fmt_num(i["price"]) + (" у.е." if i.get("currency") == "usd" else " сум")
+        price += " " + (i.get("price_per") or i.get("rent_period") or "")
+        if i.get("currency") != "usd" and i.get("price_usd"):
+            price += f" (≈{fmt_num(i['price_usd'])} у.е.)"
+    place = ", ".join(dict.fromkeys(x for x in (i.get("district"), i.get("zone"), i.get("street") or i.get("address")) if x))
+    desc = i.get("description") or ""
+    item = {
+        "id": i["id"], "price": (price or "—").strip(), "price_usd": i.get("price_usd"),
+        "usd_per_m2": i.get("usd_per_m2"), "rooms": i.get("rooms"),
+        "area": " / ".join(x for x in (f"{i['square']} м²" if i.get("square") else None,
+                                        f"{i['land_sotka']} сот." if i.get("land_sotka") else None) if x) or None,
+        "floor": f"{i['floor']}/{i['floor_total']}" if i.get("floor") else None,
+        "type": " · ".join(x for x in (i.get("subcategory") or i.get("category"),
+                                        "новостройка" if i.get("new_building") else None, i.get("repair"),
+                                        i.get("foundation")) if x) or None,
+        "place": place or None, "metro": i.get("metro"), "bargain": True if i.get("bargain") else None,
+        "views": i.get("views"), "date": i.get("up") or i.get("created"),
+        "description": desc if full or len(desc) <= TEXT_CUT else desc[:TEXT_CUT].rstrip() + "…",
+        "coords": f"{i['lat']},{i['lng']}" if full and i.get("lat") else None,
+        "url": i["url"],
+    }
+    return {k: v for k, v in item.items() if v not in (None, "", [], {})}
+
+
 def ym_group(g: dict) -> dict:
     pu = g.get("price_uzs")
     return {"items": g["items"], "price_uzs": {k: fmt_num(v) for k, v in pu.items()} if pu else None,
@@ -552,6 +635,7 @@ class Server:
         self.avtoelon_get = avtoelon.http_get  # в тестах подменяется
         self.yandex_get = None                 # None — urllib с куками (yandex.Http); в тестах подменяется
         self.shops_get = shops.http_json       # в тестах подменяется
+        self.uybor_get = uybor.http_get        # в тестах подменяется
 
     # ---------- инструменты ----------
 
@@ -767,6 +851,51 @@ class Server:
 
     def shops_list_dumps(self, args: dict, progress) -> list:
         return shops.list_dumps(max(1, min(int(args.get("limit") or 20), 100)))
+
+    def uybor_search(self, args: dict, progress) -> dict:
+        district = (args.get("district") or "").strip() or None
+        try:
+            params = uybor.build_params(args.get("operation") or "sale", args.get("category") or "apartment",
+                                        args.get("rooms"), args.get("price_from"), args.get("price_to"),
+                                        args.get("currency") or "usd", args.get("square_from"), args.get("square_to"),
+                                        args.get("new_building"), args.get("repair"), args.get("region"), args.get("sort"))
+            limit = max(1, min(int(args.get("limit") or 100), uybor.MAX_ITEMS))
+            items, total, scanned = uybor.fetch(
+                params, limit, district, get=self.uybor_get, sleep=self.sleep,
+                progress=lambda n, t: progress(n, t, f"Собрано {n}" + (f" из {t}" if t else " (ищу по району)")))
+        except uybor.UyborError as e:
+            raise ToolError(str(e)) from None
+        rep = uybor.build_report(items, params, district, total, scanned)
+        dump_id = uybor.save(rep)
+        s = rep["stats"]
+        out = {"dump_id": dump_id, "filters": params, "district": district, "items": s["items"],
+               "total_by_filters": total, "scanned": scanned if district else None,
+               "price_usd": {k: fmt_num(v) for k, v in s["price_usd"].items()} if s["price_usd"] else None,
+               "usd_per_m2_median": fmt_num(s["usd_per_m2_median"]) if s["usd_per_m2_median"] else None,
+               "rooms": s["rooms"], "districts": s["districts"], "new_building": s["new_building"],
+               "with_bargain": s["with_bargain"], "price_per_unit": s["price_per_unit"] or None,
+               "shown": f"0–{min(PAGE, len(items))} из {len(items)}"}
+        if len(items) > PAGE:
+            out["more"] = f"uybor_get_items(dump_id='{dump_id}', offset={PAGE})"
+        out["items_list"] = [compact_flat(i) for i in items[:PAGE]]
+        return {k: v for k, v in out.items() if v is not None}
+
+    def uybor_get_items(self, args: dict, progress) -> dict:
+        try:
+            rep = uybor.load(str(args["dump_id"]))
+        except uybor.UyborError as e:
+            raise ToolError(str(e)) from None
+        off = max(0, int(args.get("offset") or 0))
+        cnt = max(1, min(int(args.get("count") or PAGE), 100))
+        part = rep["items"][off:off + cnt]
+        out = {"dump_id": args["dump_id"], "total": len(rep["items"]), "shown": f"{off}–{off + len(part)}",
+               "items_list": [compact_flat(i, full=bool(args.get("full"))) for i in part]}
+        if off + cnt < len(rep["items"]):
+            out["more"] = f"uybor_get_items(dump_id='{args['dump_id']}', offset={off + cnt})"
+        return out
+
+    def uybor_list_dumps(self, args: dict, progress) -> list:
+        return uybor.list_dumps(max(1, min(int(args.get("limit") or 20), 100)))
 
     def olx_list_dumps(self, args: dict, progress) -> list:
         api = self._need_api()
